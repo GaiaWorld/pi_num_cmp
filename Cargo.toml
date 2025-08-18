@@ -1,0 +1,17 @@
+[package]
+name = "pi_num_cmp"
+version = "0.1.0"
+authors = ["zmythleo <zmythleo@gmail.com>"]
+edition = "2021"
+description = "size int bigint float num cmp"
+repository = "https://github.com/GaiaWorld/pi_num_cmp.git"
+license = "MIT OR Apache-2.0"
+keywords = ["pi", "num", "cmp", "bigint", "order"]
+
+
+[dependencies]
+derive-deref-rs = "0.1"
+
+[dev-dependencies]
+malachite = "0.6"
+malachite-base = "0.6"
