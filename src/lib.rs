@@ -18,7 +18,7 @@
 #[cfg(test)]
 mod tests;
 
-mod bigint;
+pub mod bigint;
 
 use std::cmp::Ordering;
 
