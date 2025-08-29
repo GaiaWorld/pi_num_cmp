@@ -139,6 +139,15 @@ fn test_limbs() {
         170141183460469231731687303715884105728.0
     ));
     assert!(NumCmp::num_lt(big_uint, f64::MAX));
+
+    let bignum_bytes = [0x01u8, 0x00, 0x01];
+    let big_num = BigInt::new(BigUint::from(&bignum_bytes[..]), false);
+    let n = -65537i64;
+    assert_eq!((-1 - n) as u64, 65536);
+    assert_eq!((-1 - i64::MIN) as u64, i64::MAX as u64);
+    assert_eq!((i64::MIN as u64).wrapping_neg(), i64::MAX as u64 + 1);
+    assert_eq!(big_num.num_cmp(-65537i64), Ordering::Equal);
+
 }
 
 fn assert_cmp<T: Into<Ordering>>(lhs: N, rhs: N, expected: T) {
