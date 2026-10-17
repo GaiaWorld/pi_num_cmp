@@ -82,7 +82,8 @@ assert_eq!(NumCmp::num_cmp(f32::NAN, 40_000_002u32), Ordering::Greater);
 
 ```rust
 use malachite::{Integer, Natural, platform::Limb};
-use pi_num_cmp::{NumCmp, BigUint, BigInt};
+use pi_num_cmp::NumCmp;
+use pi_num_cmp::bigint::{BigUint, BigInt};
 
 // 创建自定义的大整数引用
 let natural = Natural::from(123456789012345678901234567890u128);
@@ -107,7 +108,8 @@ assert!(NumCmp::num_lt(big_uint, 123456789012345678901234567890.0 * 2.0));
 ### 大整数支持
 
 ```rust
-use pi_num_cmp::{NumCmp, BigUint, BigInt};
+use pi_num_cmp::NumCmp;
+use pi_num_cmp::bigint::{BigUint, BigInt};
 
 // 创建自定义的大整数引用
 let big_uint = BigUint::new(&[255, 254]); // 65534
@@ -125,7 +127,8 @@ assert!(NumCmp::num_ge(-129i16, big_int));
 ### 浮点数与大整数比较
 
 ```rust
-use pi_num_cmp::{NumCmp, BigUint};
+use pi_num_cmp::NumCmp;
+use pi_num_cmp::bigint::BigUint;
 
 assert!(NumCmp::num_lt(BigUint::new(&[0xFF; 15]), f32::MAX));
 assert!(NumCmp::num_gt(BigUint::new(&[0xFF; 16]), f32::MAX));

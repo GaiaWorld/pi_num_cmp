@@ -107,6 +107,34 @@ fn test_float() {
     assert!(NumCmp::num_lt(BigUint::new(&[0xFF; 256]), f32::INFINITY));
 }
 #[test]
+fn test_biguint_f64_equal_is_less_or_equal() {
+    let one = BigUint::new(&[1]);
+    assert!(one.num_le(1.0f64));
+    assert!(1.0f64.num_ge(one));
+    let max = BigUint::new(&[0xff; 16]);
+    let two_to_128 = 2.0f64.powi(128);
+    assert_eq!(max.num_cmp(two_to_128), Ordering::Less);
+    assert_eq!(two_to_128.num_cmp(max), Ordering::Greater);
+}
+
+#[test]
+fn test_bigint_zero_sign_is_canonical() {
+    let zero = BigUint::new(&[0]);
+    let mut signed_zero = BigInt::new(zero, false);
+    assert!(signed_zero.is_sign_positive());
+    assert_eq!(signed_zero.num_cmp(0u8), Ordering::Equal);
+    assert_eq!(signed_zero.num_cmp(0i8), Ordering::Equal);
+    assert_eq!(signed_zero.num_cmp(0.0f64), Ordering::Equal);
+    assert_eq!(signed_zero.num_cmp(-0.0f32), Ordering::Equal);
+    assert_eq!(signed_zero.num_cmp(-0.0f64), Ordering::Equal);
+    assert!(signed_zero.num_le(-0.0f64));
+    assert!(signed_zero.num_ge(-0.0f32));
+    signed_zero.set_sign_positive(false);
+    assert!(signed_zero.is_sign_positive());
+    assert_eq!(signed_zero.num_cmp(0u8), Ordering::Equal);
+}
+
+#[test]
 fn test_limbs() {
     let natural = Natural::from(123456789012345678901234567890u128);
     let mut limbs = natural.limbs();

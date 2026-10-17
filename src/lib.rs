@@ -19,6 +19,8 @@
 mod tests;
 
 pub mod bigint;
+mod number;
+pub use number::{Number, NumberError};
 
 use std::cmp::Ordering;
 

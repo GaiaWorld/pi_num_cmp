@@ -106,7 +106,7 @@ impl<'a> BigUint<'a> {
                 Ordering::Less
             };
         } else if self.data.len() <= U128_BYTES {
-            if other > U128_BOUND_IN_F64 {
+            if other >= U128_BOUND_IN_F64 {
                 return Ordering::Less;
             }
             let int = other.trunc();
@@ -427,7 +427,7 @@ impl NumCmp<f64> for BigUint<'_> {
 
     #[inline]
     fn num_le(self, other: f64) -> bool {
-        self.num_cmp(other).is_lt()
+        self.num_cmp(other).is_le()
     }
 
     #[inline]
@@ -491,7 +491,7 @@ impl<'a> BigInt<'a> {
     pub const fn new(biguint: BigUint<'a>, sign_positive: bool) -> Self {
         BigInt {
             biguint,
-            sign_positive,
+            sign_positive: sign_positive || biguint.data.is_empty(),
         }
     }
     /// Get the sign.
@@ -502,7 +502,7 @@ impl<'a> BigInt<'a> {
     /// Set the sign.
     #[inline]
     pub fn set_sign_positive(&mut self, sign_positive: bool) {
-        self.sign_positive = sign_positive;
+        self.sign_positive = sign_positive || self.biguint.data.is_empty();
     }
 }
 impl<'a> From<BigUint<'a>> for BigInt<'a> {
@@ -542,7 +542,7 @@ impl NumCmp<f32> for BigInt<'_> {
         if other == f32::NEG_INFINITY {
             return Ordering::Greater;
         }
-        match (self.sign_positive, other.is_sign_positive()) {
+        match (self.sign_positive, other >= 0.0) {
             (true, true) => self.finite_positive_f32_cmp(other),
             (false, true) => Ordering::Less,
             (true, false) => Ordering::Greater,
@@ -555,7 +555,7 @@ impl NumCmp<f32> for BigInt<'_> {
         if !other.is_finite() {
             return false;
         }
-        match (self.sign_positive, other.is_sign_positive()) {
+        match (self.sign_positive, other >= 0.0) {
             (true, true) => self.finite_positive_f32_cmp(other).is_eq(),
             (false, false) => self.finite_positive_f32_cmp(-other).is_eq(),
             _ => false,
@@ -575,7 +575,7 @@ impl NumCmp<f32> for BigInt<'_> {
         if other == f32::NEG_INFINITY {
             return false;
         }
-        match (self.sign_positive, other.is_sign_positive()) {
+        match (self.sign_positive, other >= 0.0) {
             (true, true) => self.finite_positive_f32_cmp(other).is_lt(),
             (false, true) => true,
             (true, false) => false,
@@ -591,7 +591,7 @@ impl NumCmp<f32> for BigInt<'_> {
         if other == f32::NEG_INFINITY {
             return true;
         }
-        match (self.sign_positive, other.is_sign_positive()) {
+        match (self.sign_positive, other >= 0.0) {
             (true, true) => self.finite_positive_f32_cmp(other).is_gt(),
             (false, true) => false,
             (true, false) => true,
@@ -607,7 +607,7 @@ impl NumCmp<f32> for BigInt<'_> {
         if other == f32::NEG_INFINITY {
             return false;
         }
-        match (self.sign_positive, other.is_sign_positive()) {
+        match (self.sign_positive, other >= 0.0) {
             (true, true) => self.finite_positive_f32_cmp(other).is_le(),
             (false, true) => true,
             (true, false) => false,
@@ -623,7 +623,7 @@ impl NumCmp<f32> for BigInt<'_> {
         if other == f32::NEG_INFINITY {
             return true;
         }
-        match (self.sign_positive, other.is_sign_positive()) {
+        match (self.sign_positive, other >= 0.0) {
             (true, true) => self.finite_positive_f32_cmp(other).is_ge(),
             (false, true) => false,
             (true, false) => true,
@@ -688,7 +688,7 @@ impl NumCmp<f64> for BigInt<'_> {
         if other == f64::NEG_INFINITY {
             return Ordering::Greater;
         }
-        match (self.sign_positive, other.is_sign_positive()) {
+        match (self.sign_positive, other >= 0.0) {
             (true, true) => self.finite_positive_f64_cmp(other),
             (false, true) => Ordering::Less,
             (true, false) => Ordering::Greater,
@@ -701,7 +701,7 @@ impl NumCmp<f64> for BigInt<'_> {
         if !other.is_finite() {
             return false;
         }
-        match (self.sign_positive, other.is_sign_positive()) {
+        match (self.sign_positive, other >= 0.0) {
             (true, true) => self.finite_positive_f64_cmp(other).is_eq(),
             (false, false) => self.finite_positive_f64_cmp(-other).is_eq(),
             _ => false,
@@ -721,7 +721,7 @@ impl NumCmp<f64> for BigInt<'_> {
         if other == f64::NEG_INFINITY {
             return false;
         }
-        match (self.sign_positive, other.is_sign_positive()) {
+        match (self.sign_positive, other >= 0.0) {
             (true, true) => self.finite_positive_f64_cmp(other).is_lt(),
             (false, true) => true,
             (true, false) => false,
@@ -737,7 +737,7 @@ impl NumCmp<f64> for BigInt<'_> {
         if other == f64::NEG_INFINITY {
             return true;
         }
-        match (self.sign_positive, other.is_sign_positive()) {
+        match (self.sign_positive, other >= 0.0) {
             (true, true) => self.finite_positive_f64_cmp(other).is_gt(),
             (false, true) => false,
             (true, false) => true,
@@ -753,7 +753,7 @@ impl NumCmp<f64> for BigInt<'_> {
         if other == f64::NEG_INFINITY {
             return false;
         }
-        match (self.sign_positive, other.is_sign_positive()) {
+        match (self.sign_positive, other >= 0.0) {
             (true, true) => self.finite_positive_f64_cmp(other).is_le(),
             (false, true) => true,
             (true, false) => false,
@@ -769,7 +769,7 @@ impl NumCmp<f64> for BigInt<'_> {
         if other == f64::NEG_INFINITY {
             return true;
         }
-        match (self.sign_positive, other.is_sign_positive()) {
+        match (self.sign_positive, other >= 0.0) {
             (true, true) => self.finite_positive_f64_cmp(other).is_ge(),
             (false, true) => false,
             (true, false) => true,
