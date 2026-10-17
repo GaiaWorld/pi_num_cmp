@@ -118,6 +118,148 @@ fn test_biguint_f64_equal_is_less_or_equal() {
 }
 
 #[test]
+fn test_biguint_borrowed_representations() {
+    for value in [0u128, 1, 255, 256, 65537, u64::MAX as u128, u128::MAX] {
+        let be = value.to_be_bytes();
+        let le = value.to_le_bytes();
+        let natural = Natural::from(value);
+        let views = [BigUint::new(&be), BigUint::from_le_bytes(&le), BigUint::from_natural(&natural)];
+        for a in views {
+            assert_eq!(a.num_cmp(value), Ordering::Equal);
+            assert_eq!(a.high_bits(), (128 - value.leading_zeros()) as usize);
+            assert_eq!(a.bytes_be().rev().collect::<Vec<_>>(), a.bytes_be().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>());
+            for b in views {
+                assert_eq!(a, b);
+                assert_eq!(a.num_cmp(b), Ordering::Equal);
+            }
+            for f in [0.0, -0.0, 1.5, f64::MAX, f64::INFINITY, f64::NAN] {
+                assert_eq!(a.num_cmp(f), value.num_cmp(f));
+                assert_eq!(a.num_le(f), value.num_le(f));
+                assert_eq!(f.num_cmp(a), f.num_cmp(value));
+            }
+        }
+    }
+    for exponent in [128usize, 129, 255, 256, 1023] {
+        let value = Natural::from(1u8) << exponent;
+        let natural = BigUint::from_natural(&value);
+        let be = natural.bytes_be().collect::<Vec<_>>();
+        let le = be.iter().rev().copied().collect::<Vec<_>>();
+        for view in [natural, BigUint::new(&be), BigUint::from_le_bytes(&le)] {
+            assert_eq!(view.num_cmp(2f64.powi(exponent as i32)), Ordering::Equal);
+            assert_eq!(view.num_cmp(f32::MAX), Ordering::Greater);
+        }
+        let above = value + Natural::from(1u8);
+        let borrowed = BigUint::from_natural(&above);
+        let bytes = borrowed.bytes_be().collect::<Vec<_>>();
+        let little = bytes.iter().rev().copied().collect::<Vec<_>>();
+        for view in [borrowed, BigUint::new(&bytes), BigUint::from_le_bytes(&little)] {
+            assert_eq!(view.num_cmp(2f64.powi(exponent as i32)), Ordering::Greater);
+            assert_eq!(BigInt::new(view, false).num_cmp(-2f64.powi(exponent as i32)), Ordering::Less);
+        }
+    }
+    let zero = Natural::from(0u8);
+    for view in [BigUint::new(&[0, 0]), BigUint::from_le_bytes(&[0, 0]), BigUint::from_natural(&zero)] {
+        assert!(view.is_empty());
+        let signed = BigInt::new(view, false);
+        assert!(signed.is_sign_positive());
+        assert_eq!(signed.num_cmp(-0.0f64), Ordering::Equal);
+    }
+}
+
+#[test]
+fn test_bytes_be_interleaved_and_cloned() {
+    use std::collections::VecDeque;
+    for len in 0..40 {
+        let mut bytes: Vec<u8> = (0..len).map(|i| (i * 37 + 1) as u8).collect();
+        if len > 0 { bytes[0] = 1; }
+        let mut natural = Natural::from(0u8);
+        for b in &bytes { natural = (natural << 8usize) + Natural::from(*b); }
+        let little = bytes.iter().rev().copied().collect::<Vec<_>>();
+        for view in [BigUint::new(&bytes), BigUint::from_le_bytes(&little), BigUint::from_natural(&natural)] {
+            for high_first in [true, false] {
+                let mut iter = view.bytes_be();
+                let mut expected = VecDeque::from(bytes.clone());
+                let mut high = high_first;
+                while !expected.is_empty() {
+                    assert_eq!(iter.len(), expected.len());
+                    assert_eq!(iter.size_hint(), (expected.len(), Some(expected.len())));
+                    assert_eq!(iter.clone().collect::<Vec<_>>(), expected.iter().copied().collect::<Vec<_>>());
+                    if high { assert_eq!(iter.next(), expected.pop_front()); }
+                    else { assert_eq!(iter.next_back(), expected.pop_back()); }
+                    high = !high;
+                }
+                assert_eq!(iter.len(), 0);
+                assert_eq!(iter.next(), None);
+                assert_eq!(iter.next_back(), None);
+                assert_eq!(iter.next(), None);
+            }
+        }
+    }
+}
+
+#[test]
+fn test_biguint_constructor_normalizes_without_copy() {
+    const BE: BigUint<'static> = BigUint::new(&[0, 0, 1, 0]);
+    const LE: BigUint<'static> = BigUint::from_le_bytes(&[0, 1, 0, 0]);
+    assert_eq!(BE, LE);
+    assert_eq!(BE.len(), 2);
+    assert_eq!(LE.len(), 2);
+    assert_eq!(BE.num_cmp(256u16), Ordering::Equal);
+    let input = [0, 0, 1, 0];
+    let view = BigUint::new(&input);
+    assert!(std::ptr::eq(view.as_be_bytes().unwrap().as_ptr(), input[2..].as_ptr()));
+    assert_eq!(view.as_be_bytes(), Some(&input[2..]));
+    assert_eq!(LE.bytes_be().collect::<Vec<_>>(), vec![1, 0]);
+    for bytes in [&[][..], &[0][..], &[0, 0, 0][..]] {
+        for view in [BigUint::new(bytes), BigUint::from_le_bytes(bytes)] {
+            assert!(view.is_empty());
+            assert_eq!(view.bytes_be().next(), None);
+            assert_eq!(view.num_cmp(0u8), Ordering::Equal);
+        }
+    }
+}
+
+#[test]
+fn test_biguint_fixed_width_comparison_methods() {
+    macro_rules! check {
+        ($view:expr, $left:expr, $right:expr) => {{
+            let (view, left, right) = ($view, $left, $right);
+            let expected = left.cmp(&(right as u128));
+            assert_eq!(view.num_cmp(right), expected);
+            assert_eq!(view.num_eq(right), expected.is_eq());
+            assert_eq!(view.num_ne(right), expected.is_ne());
+            assert_eq!(view.num_lt(right), expected.is_lt());
+            assert_eq!(view.num_gt(right), expected.is_gt());
+            assert_eq!(view.num_le(right), expected.is_le());
+            assert_eq!(view.num_ge(right), expected.is_ge());
+            assert_eq!(right.num_cmp(view), expected.reverse());
+            assert_eq!(right.num_eq(view), expected.is_eq());
+            assert_eq!(right.num_ne(view), expected.is_ne());
+            assert_eq!(right.num_lt(view), expected.is_gt());
+            assert_eq!(right.num_gt(view), expected.is_lt());
+            assert_eq!(right.num_le(view), expected.is_ge());
+            assert_eq!(right.num_ge(view), expected.is_le());
+        }};
+    }
+    for left in [0u128, 1, 255, 256, 65535, 65536, u32::MAX as u128,
+        1u128 << 32, u64::MAX as u128, 1u128 << 64, u128::MAX] {
+        let be = left.to_be_bytes();
+        let le = left.to_le_bytes();
+        let natural = Natural::from(left);
+        for view in [BigUint::new(&be), BigUint::from_le_bytes(&le), BigUint::from_natural(&natural)] {
+            for right in [0u128, 1, 255, 256, 65535, 65536, u32::MAX as u128,
+                1u128 << 32, u64::MAX as u128, 1u128 << 64, u128::MAX] {
+                check!(view, left, right as u8);
+                check!(view, left, right as u16);
+                check!(view, left, right as u32);
+                check!(view, left, right as u64);
+                check!(view, left, right);
+            }
+        }
+    }
+}
+
+#[test]
 fn test_bigint_zero_sign_is_canonical() {
     let zero = BigUint::new(&[0]);
     let mut signed_zero = BigInt::new(zero, false);
@@ -149,8 +291,8 @@ fn test_limbs() {
     );
     let big_uint = BigUint::new(&vec);
     assert_eq!(
-        big_uint.as_slice(),
-        &[1, 142, 233, 15, 246, 195, 115, 224, 238, 78, 63, 10, 210]
+        big_uint.bytes_be().collect::<Vec<_>>(),
+        vec![1, 142, 233, 15, 246, 195, 115, 224, 238, 78, 63, 10, 210]
     );
     assert!(NumCmp::num_gt(big_uint, 10000i16));
     assert!(NumCmp::num_eq(123456789012345678901234567890u128, big_uint));

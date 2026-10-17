@@ -21,6 +21,8 @@ mod tests;
 pub mod bigint;
 mod number;
 pub use number::{Number, NumberError};
+mod number_ref;
+pub use number_ref::NumberRef;
 
 use std::cmp::Ordering;
 

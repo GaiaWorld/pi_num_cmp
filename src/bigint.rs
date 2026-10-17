@@ -1,6 +1,93 @@
 use crate::{NumCmp, U128_BOUND_IN_F64};
 use derive_deref_rs::Deref;
+use malachite::natural::conversion::to_limbs::LimbIterator;
+use malachite::{platform::Limb, Natural};
+use malachite_base::num::logic::traits::SignificantBits;
 use std::cmp::Ordering;
+use std::iter::{Copied, FusedIterator, Rev};
+use std::slice::Iter;
+
+/// 高位优先的零分配字节迭代器；存储类型在创建时分派。
+#[derive(Clone)]
+pub enum BytesBe<'a> {
+    Be(Copied<Iter<'a, u8>>),
+    Le(Rev<Copied<Iter<'a, u8>>>),
+    Natural(NaturalBytes<'a>),
+}
+
+/// Natural 的字节游标；两端分别缓存 Limb，支持交错读取而不重复构建 limbs。
+#[derive(Clone)]
+pub struct NaturalBytes<'a> {
+    limbs: LimbIterator<'a>,
+    front: usize,
+    back: usize,
+    high: (usize, Limb),
+    low: (usize, Limb),
+}
+impl NaturalBytes<'_> {
+    fn read(&mut self, index: usize, high: bool) -> u8 {
+        let width = std::mem::size_of::<Limb>();
+        let limb_index = index / width;
+        let cache = if high { &mut self.high } else { &mut self.low };
+        if cache.0 != limb_index {
+            *cache = (limb_index, self.limbs[limb_index]);
+        }
+        (cache.1 >> ((index % width) * 8)) as u8
+    }
+}
+impl Iterator for NaturalBytes<'_> {
+    type Item = u8;
+    fn next(&mut self) -> Option<u8> {
+        if self.front == self.back {
+            return None;
+        }
+        self.back -= 1;
+        Some(self.read(self.back, true))
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.back - self.front;
+        (len, Some(len))
+    }
+}
+impl DoubleEndedIterator for NaturalBytes<'_> {
+    fn next_back(&mut self) -> Option<u8> {
+        if self.front == self.back {
+            return None;
+        }
+        let index = self.front;
+        self.front += 1;
+        Some(self.read(index, false))
+    }
+}
+impl ExactSizeIterator for NaturalBytes<'_> {}
+impl FusedIterator for NaturalBytes<'_> {}
+
+// 在热点循环外展开具体迭代器，循环内不再区分字节序或存储类型。
+macro_rules! with_bytes {
+    ($bytes:expr, $iter:ident => $body:expr) => {
+        match $bytes {
+            BytesBe::Be($iter) => $body,
+            BytesBe::Le($iter) => $body,
+            BytesBe::Natural($iter) => $body,
+        }
+    };
+}
+impl Iterator for BytesBe<'_> {
+    type Item = u8;
+    fn next(&mut self) -> Option<u8> {
+        with_bytes!(self, iter => iter.next())
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        with_bytes!(self, iter => iter.size_hint())
+    }
+}
+impl DoubleEndedIterator for BytesBe<'_> {
+    fn next_back(&mut self) -> Option<u8> {
+        with_bytes!(self, iter => iter.next_back())
+    }
+}
+impl ExactSizeIterator for BytesBe<'_> {}
+impl FusedIterator for BytesBe<'_> {}
 
 const BYTES_BOUND_IN_F32: usize = f32::MAX_EXP as usize / u8::BITS as usize;
 const BYTES_BOUND_IN_F64: usize = f64::MAX_EXP as usize / u8::BITS as usize;
@@ -8,11 +95,38 @@ const U64_BYTES: usize = (u64::BITS / u8::BITS) as usize;
 const U64_MANTISSA_BYTES: usize = 53 / u8::BITS as usize + 1;
 const U128_BYTES: usize = (u128::BITS / u8::BITS) as usize;
 
-/// A big unsigned integer type.
-/// big endian, high front, low back
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 零拷贝的无符号整数视图，大小端字节和 Natural 按数值统一比较。
+/// 构造时裁掉高位零；私有存储确保调用方不能绕过规范化，视图保持 Copy。
+///
+/// ```rust
+/// use malachite::Natural;
+/// use pi_num_cmp::{bigint::BigUint, NumCmp};
+/// let natural = Natural::from(256u32);
+/// let a = BigUint::from_natural(&natural);
+/// let b = BigUint::from_le_bytes(&[0, 1, 0]);
+/// assert_eq!(a, b);
+/// assert!(a.num_eq(256u32));
+/// assert_eq!(a.bytes_be().collect::<Vec<_>>(), vec![1, 0]);
+/// ```
+///
+/// 存储字段不公开，不能绕过构造函数的规范化约束：
+/// ```compile_fail
+/// use pi_num_cmp::bigint::BigUint;
+/// let value = BigUint::BeBytes(&[0, 1]);
+/// ```
+#[derive(Debug, Clone, Copy)]
 pub struct BigUint<'a> {
-    data: &'a [u8],
+    storage: BigUintStorage<'a>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BigUintStorage<'a> {
+    /// 大端字节，高位在前。
+    BeBytes(&'a [u8]),
+    /// 小端字节，低位在前。
+    LeBytes(&'a [u8]),
+    /// 借用 malachite 幅值，通过 limbs 读取而不复制。
+    Natural(&'a Natural),
 }
 impl<'a> From<&'a [u8]> for BigUint<'a> {
     #[inline]
@@ -22,10 +136,44 @@ impl<'a> From<&'a [u8]> for BigUint<'a> {
 }
 impl<'a> BigUint<'a> {
     #[inline]
+    /// 借用大端字节；保留原构造入口的字节序含义。
     pub const fn new(value: &'a [u8]) -> Self {
-        let i = Self::leading_zeros(value);
-        let (_, data) = unsafe { value.split_at_unchecked(i) };
-        BigUint { data }
+        let start = Self::leading_zeros(value);
+        let (_, data) = value.split_at(start);
+        Self {
+            storage: BigUintStorage::BeBytes(data),
+        }
+    }
+    /// 借用小端字节，不复制底层数据。
+    pub const fn from_le_bytes(value: &'a [u8]) -> Self {
+        let mut end = value.len();
+        while end > 0 && value[end - 1] == 0 {
+            end -= 1;
+        }
+        let (data, _) = value.split_at(end);
+        Self {
+            storage: BigUintStorage::LeBytes(data),
+        }
+    }
+    /// 直接借用 Natural，不创建临时字节缓冲。
+    pub const fn from_natural(value: &'a Natural) -> Self {
+        Self {
+            storage: BigUintStorage::Natural(value),
+        }
+    }
+    /// 若底层为大端字节，返回规范化后的原始借用切片。
+    pub const fn as_be_bytes(&self) -> Option<&'a [u8]> {
+        match self.storage {
+            BigUintStorage::BeBytes(data) => Some(data),
+            _ => None,
+        }
+    }
+    /// 若底层为 Natural，返回原始借用，不复制数据。
+    pub const fn as_natural(&self) -> Option<&'a Natural> {
+        match self.storage {
+            BigUintStorage::Natural(value) => Some(value),
+            _ => None,
+        }
     }
     #[inline]
     pub const fn leading_zeros(value: &[u8]) -> usize {
@@ -38,59 +186,68 @@ impl<'a> BigUint<'a> {
         }
         i
     }
-    /// Get the length of the underlying data.
+    /// 有效字节数，不包含高位零。
     #[inline]
     pub fn len(&self) -> usize {
-        self.data.len()
+        match self.storage {
+            BigUintStorage::BeBytes(data) | BigUintStorage::LeBytes(data) => data.len(),
+            BigUintStorage::Natural(value) => value.significant_bits().div_ceil(8) as usize,
+        }
     }
-    #[inline]
-    pub fn as_slice(&self) -> &'a [u8] {
-        &self.data
+    /// 数值是否为零。
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// 从最高有效字节到最低有效字节迭代，不分配内存。
+    /// 与原 as_slice 不同，支持没有连续大端切片的存储形式。
+    pub fn bytes_be(self) -> BytesBe<'a> {
+        match self.storage {
+            BigUintStorage::BeBytes(data) => BytesBe::Be(data.iter().copied()),
+            BigUintStorage::LeBytes(data) => BytesBe::Le(data.iter().copied().rev()),
+            BigUintStorage::Natural(value) => BytesBe::Natural(NaturalBytes {
+                limbs: value.limbs(),
+                front: 0,
+                back: value.significant_bits().div_ceil(8) as usize,
+                high: (usize::MAX, 0),
+                low: (usize::MAX, 0),
+            }),
+        }
     }
     #[inline]
     pub fn bits(&self) -> usize {
-        self.data.len() << 3
+        self.len() << 3
     }
     #[inline]
     pub fn high_bits(&self) -> usize {
-        if self.data.len() == 0 {
-            return 0;
-        }
-        self.bits() - self.data[0].leading_zeros() as usize
+        self.bytes_be()
+            .next()
+            .map_or(0, |first| self.bits() - first.leading_zeros() as usize)
     }
     #[inline]
     fn to_u64(&self) -> u64 {
         let mut data = [0; U64_BYTES];
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                self.data.as_ptr(),
-                data.as_mut_ptr(),
-                self.data.len().min(U64_BYTES),
-            )
-        };
+        with_bytes!(self.bytes_be(), iter => {
+            for (out, byte) in data.iter_mut().zip(iter) { *out = byte; }
+        });
         u64::from_be_bytes(data)
     }
     #[inline]
     fn to_u128(&self) -> u128 {
         let mut data = [0; U128_BYTES];
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                self.data.as_ptr(),
-                data.as_mut_ptr()
-                    .add(U128_BYTES.saturating_sub(self.data.len())),
-                self.data.len().min(U128_BYTES),
-            )
-        };
+        let offset = U128_BYTES.saturating_sub(self.len());
+        with_bytes!(self.bytes_be(), iter => {
+            for (out, byte) in data[offset..].iter_mut().zip(iter) { *out = byte; }
+        });
         u128::from_be_bytes(data)
     }
     fn finite_positive_f32_cmp(&self, other: f32) -> Ordering {
-        if self.data.len() == 0 {
+        if self.is_empty() {
             return if other == 0.0 {
                 Ordering::Equal
             } else {
                 Ordering::Less
             };
-        } else if self.data.len() > BYTES_BOUND_IN_F32 {
+        } else if self.len() > BYTES_BOUND_IN_F32 {
             return Ordering::Greater;
         }
         let int = other.trunc();
@@ -99,13 +256,13 @@ impl<'a> BigUint<'a> {
             .unwrap()
     }
     fn finite_positive_f64_cmp(&self, other: f64) -> Ordering {
-        if self.data.len() == 0 {
+        if self.is_empty() {
             return if other == 0.0 {
                 Ordering::Equal
             } else {
                 Ordering::Less
             };
-        } else if self.data.len() <= U128_BYTES {
+        } else if self.len() <= U128_BYTES {
             if other >= U128_BOUND_IN_F64 {
                 return Ordering::Less;
             }
@@ -113,7 +270,7 @@ impl<'a> BigUint<'a> {
             return (self.to_u128(), int)
                 .partial_cmp(&(int as u128, other))
                 .unwrap();
-        } else if self.data.len() > BYTES_BOUND_IN_F64 {
+        } else if self.len() > BYTES_BOUND_IN_F64 {
             return Ordering::Greater;
         } else if other < 1.0 {
             return Ordering::Greater;
@@ -158,16 +315,14 @@ impl<'a> BigUint<'a> {
                 return Ordering::Greater;
             }
             // 如果高64位区间都相等，则继续检查大数剩余部分，如果有剩余，则大数大
-            for d in &self.data[U64_BYTES..] {
-                if *d != 0 {
-                    return Ordering::Greater;
-                }
+            if with_bytes!(self.bytes_be(), iter => iter.skip(U64_BYTES).any(|d| d != 0)) {
+                return Ordering::Greater;
             }
             Ordering::Equal
         } else {
             // 情况2: 指数偏移 < 0 (f 表示为分数), 分子为 significand, 分母为 2^(-exp_power)
             // 必定小于 2^53
-            if self.data.len() > U64_MANTISSA_BYTES {
+            if self.len() > U64_MANTISSA_BYTES {
                 return Ordering::Greater;
             }
 
@@ -184,27 +339,37 @@ impl<'a> BigUint<'a> {
     }
     #[inline]
     fn bytes_cmp<const N: usize>(self, other: &[u8; N]) -> Ordering {
-        if self.data.len() > N {
+        let len = self.len();
+        if len > N {
             return Ordering::Greater;
         }
-        if self.data.len() < N {
-            let i = Self::leading_zeros(other);
-            let (_, other) = unsafe { other.split_at_unchecked(i) };
-            return (self.data.len(), self.data).cmp(&(other.len(), other));
+        // 同宽时直接比较；只有不足 N 字节时才扫描对方的高位零。
+        let other = if len < N {
+            &other[Self::leading_zeros(other)..]
+        } else {
+            &other[..]
+        };
+        if len != other.len() {
+            return len.cmp(&other.len());
         }
-        self.data.cmp(other)
+        with_bytes!(self.bytes_be(), left => left.cmp(other.iter().copied()))
     }
     #[inline]
     fn bytes_eq<const N: usize>(self, other: &[u8; N]) -> bool {
-        if self.data.len() > N {
+        let len = self.len();
+        if len > N {
             return false;
         }
-        if self.data.len() < N {
-            let i = Self::leading_zeros(other);
-            let (_, other) = unsafe { other.split_at_unchecked(i) };
-            return (self.data.len(), self.data).eq(&(other.len(), other));
+        // 同宽时直接比较；只有不足 N 字节时才扫描对方的高位零。
+        let other = if len < N {
+            &other[Self::leading_zeros(other)..]
+        } else {
+            &other[..]
+        };
+        if len != other.len() {
+            return false;
         }
-        self.data.eq(other)
+        with_bytes!(self.bytes_be(), left => left.eq(other.iter().copied()))
     }
 
     #[inline]
@@ -214,62 +379,90 @@ impl<'a> BigUint<'a> {
 
     #[inline]
     fn bytes_lt<const N: usize>(self, other: &[u8; N]) -> bool {
-        if self.data.len() > N {
+        let len = self.len();
+        if len > N {
             return false;
         }
-        if self.data.len() < N {
-            let i = Self::leading_zeros(other);
-            let (_, other) = unsafe { other.split_at_unchecked(i) };
-            return (self.data.len(), self.data).lt(&(other.len(), other));
+        // 同宽时直接比较；只有不足 N 字节时才扫描对方的高位零。
+        let other = if len < N {
+            &other[Self::leading_zeros(other)..]
+        } else {
+            &other[..]
+        };
+        if len != other.len() {
+            return len < other.len();
         }
-        self.data.lt(other)
+        with_bytes!(self.bytes_be(), left => left.lt(other.iter().copied()))
     }
 
     #[inline]
     fn bytes_gt<const N: usize>(self, other: &[u8; N]) -> bool {
-        if self.data.len() > N {
+        let len = self.len();
+        if len > N {
             return true;
         }
-        if self.data.len() < N {
-            let i = Self::leading_zeros(other);
-            let (_, other) = unsafe { other.split_at_unchecked(i) };
-            return (self.data.len(), self.data).gt(&(other.len(), other));
+        // 同宽时直接比较；只有不足 N 字节时才扫描对方的高位零。
+        let other = if len < N {
+            &other[Self::leading_zeros(other)..]
+        } else {
+            &other[..]
+        };
+        if len != other.len() {
+            return len > other.len();
         }
-        self.data.gt(other)
+        with_bytes!(self.bytes_be(), left => left.gt(other.iter().copied()))
     }
 
     #[inline]
     fn bytes_le<const N: usize>(self, other: &[u8; N]) -> bool {
-        if self.data.len() > N {
+        let len = self.len();
+        if len > N {
             return false;
         }
-        if self.data.len() < N {
-            let i = Self::leading_zeros(other);
-            let (_, other) = unsafe { other.split_at_unchecked(i) };
-            return (self.data.len(), self.data).le(&(other.len(), other));
+        // 同宽时直接比较；只有不足 N 字节时才扫描对方的高位零。
+        let other = if len < N {
+            &other[Self::leading_zeros(other)..]
+        } else {
+            &other[..]
+        };
+        if len != other.len() {
+            return len < other.len();
         }
-        self.data.le(other)
+        with_bytes!(self.bytes_be(), left => left.le(other.iter().copied()))
     }
 
     #[inline]
     fn bytes_ge<const N: usize>(self, other: &[u8; N]) -> bool {
-        if self.data.len() > N {
+        let len = self.len();
+        if len > N {
             return true;
         }
-        if self.data.len() < N {
-            let i = Self::leading_zeros(other);
-            let (_, other) = unsafe { other.split_at_unchecked(i) };
-            return (self.data.len(), self.data).ge(&(other.len(), other));
+        // 同宽时直接比较；只有不足 N 字节时才扫描对方的高位零。
+        let other = if len < N {
+            &other[Self::leading_zeros(other)..]
+        } else {
+            &other[..]
+        };
+        if len != other.len() {
+            return len > other.len();
         }
-        self.data.ge(other)
+        with_bytes!(self.bytes_be(), left => left.ge(other.iter().copied()))
     }
 }
 impl<'a> Ord for BigUint<'a> {
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
-        (self.data.len(), self.data).cmp(&(other.data.len(), other.data))
+        self.len()
+            .cmp(&other.len())
+            .then_with(|| with_bytes!(self.bytes_be(), left => with_bytes!(other.bytes_be(), right => left.cmp(right))))
     }
 }
+impl PartialEq for BigUint<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+impl Eq for BigUint<'_> {}
 impl<'a> PartialOrd for BigUint<'a> {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -488,10 +681,10 @@ pub struct BigInt<'a> {
 impl<'a> BigInt<'a> {
     /// Create a new `BigInt` from a BigUint and sign.
     #[inline]
-    pub const fn new(biguint: BigUint<'a>, sign_positive: bool) -> Self {
+    pub fn new(biguint: BigUint<'a>, sign_positive: bool) -> Self {
         BigInt {
             biguint,
-            sign_positive: sign_positive || biguint.data.is_empty(),
+            sign_positive: sign_positive || biguint.is_empty(),
         }
     }
     /// Get the sign.
@@ -502,7 +695,7 @@ impl<'a> BigInt<'a> {
     /// Set the sign.
     #[inline]
     pub fn set_sign_positive(&mut self, sign_positive: bool) {
-        self.sign_positive = sign_positive || self.biguint.data.is_empty();
+        self.sign_positive = sign_positive || self.biguint.is_empty();
     }
 }
 impl<'a> From<BigUint<'a>> for BigInt<'a> {

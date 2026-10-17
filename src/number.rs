@@ -69,14 +69,11 @@ macro_rules! with_number {
                     let $value = small;
                     $body
                 } else {
-                    // 库内 BigInt 接受大端字节；只在超出 i128 时构建临时缓冲。
-                    let magnitude = $value.unsigned_abs_ref();
-                    let mut bytes =
-                        Vec::with_capacity(magnitude.limbs().len() * std::mem::size_of::<Limb>());
-                    for limb in magnitude.limbs().rev() {
-                        bytes.extend_from_slice(&limb.to_be_bytes());
-                    }
-                    let $value = BigInt::new(BigUint::new(&bytes), $value >= &BigInteger::ZERO);
+                    // 直接借用 Natural 幅值，不创建中间字节缓冲。
+                    let $value = BigInt::new(
+                        BigUint::from_natural($value.unsigned_abs_ref()),
+                        $value >= &BigInteger::ZERO,
+                    );
                     $body
                 }
             }
