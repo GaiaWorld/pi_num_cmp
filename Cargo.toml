@@ -11,16 +11,14 @@ keywords = ["pi", "num", "cmp", "bigint", "order"]
 
 [dependencies]
 derive-deref-rs = "0.1"
-num-bigint = "0.4"
-num-traits = "0.2"
+malachite = { version = "0.6", default-features = false, features = ["naturals_and_integers"] }
+malachite-base = "0.6"
 serde = { version = "1", features = ["derive"], optional = true }
 fory = { version = "1.7", optional = true }
 
 [features]
-serde = ["dep:serde", "num-bigint/serde"]
+serde = ["dep:serde", "malachite/enable_serde"]
 fory = ["dep:fory"]
 
 [dev-dependencies]
-malachite = "0.6"
-malachite-base = "0.6"
 serde_json = "1"

@@ -54,7 +54,7 @@
 
 ```toml
 [dependencies]
-pi_num_cmp = "0.1"
+pi_num_cmp = "0.2"
 ```
 
 ## 使用示例
@@ -121,7 +121,7 @@ assert!(NumCmp::num_gt(big_uint, 10000i16));
 
 // 带符号比较
 assert!(NumCmp::num_lt(big_int, 0i32));
-assert!(NumCmp::num_ge(-129i16, big_int));
+assert!(NumCmp::num_lt(-129i16, big_int));
 ```
 
 ### 浮点数与大整数比较
@@ -136,6 +136,90 @@ assert!(NumCmp::num_lt(BigUint::new(&[0xFF; 127]), f64::MAX));
 assert!(NumCmp::num_gt(BigUint::new(&[0xFF; 128]), f64::MAX));
 assert!(NumCmp::num_lt(BigUint::new(&[0xFF; 256]), f32::INFINITY));
 ```
+
+## 通用数值 Number
+
+`Number` 是拥有数据的数值枚举，适合数据库记录、排序和哈希集合。与借用字节的 `bigint::BigInt` 不同，`Number::Integer` 直接持有 `malachite::Integer`。
+
+```rust
+pub enum Number {
+    I64(i64),
+    I128(i128),
+    F64(f64),
+    Integer(malachite::Integer),
+}
+```
+
+### 比较与哈希
+
+- `Eq`、`Ord`、`Hash` 按数值判断，不按变体区分；`I64(1)`、`I128(1)`、`F64(1.0)` 和大整数 1 相等且哈希一致。
+- 正负零相等；所有 NaN 相等且大于正无穷；跨类型比较不先将整数转成浮点数，因此不会因浮点精度丢失而误判相等。
+- 跨类型比较复用 `NumCmp`，两个 `Integer` 直接比较。`Number` 不是 `Copy`，不直接实现要求 `Copy` 的 `NumCmp`，请使用标准比较运算或 `cmp`。
+- 哈希借用大整数的 limbs，不克隆幅值。哈希值不作为数据库的稳定编码或持久化标识。
+
+```rust
+use malachite::Integer;
+use pi_num_cmp::Number;
+use std::collections::HashSet;
+
+let mut values = HashSet::new();
+values.insert(Number::I64(1));
+values.insert(Number::F64(1.0));
+values.insert(Number::Integer(Integer::from(1)));
+assert_eq!(values.len(), 1);
+assert!(Number::I128(9_007_199_254_740_993) > Number::F64(9_007_199_254_740_992.0));
+```
+
+### 四则运算
+
+`+`、`-`、`*`、`/` 和对应的 `checked_add`、`checked_sub`、`checked_mul`、`checked_div` 消耗操作数，均返回 `Result<Number, NumberError>`。需要保留原值时由调用方显式克隆。
+
+| 输入组合 | 结果规则 |
+| --- | --- |
+| 两个 I64 | 优先返回 I64，溢出后提升到 I128 |
+| 含 I128 的原生整数 | 返回 I128，溢出后提升到 Integer |
+| 含 Integer 的纯整数 | 使用 malachite 运算并保留 Integer，不自动缩回原生整数 |
+| 任一操作数为 F64 | 返回 F64；整数转换为浮点数可能损失精度，溢出可得到无穷 |
+| 纯整数除法 | 向零截断，例如 -7 / 2 = -3 |
+| 任意类型的零除数 | 返回 NumberError::DivisionByZero，浮点正负零也报错 |
+
+```rust
+use pi_num_cmp::{Number, NumberError};
+
+let sum = (Number::I64(i64::MAX) + Number::I64(1)).unwrap();
+assert!(matches!(sum, Number::I128(_)));
+assert_eq!((Number::I64(-7) / Number::I64(2)).unwrap(), Number::I64(-3));
+assert_eq!(Number::I64(1).checked_div(Number::F64(-0.0)), Err(NumberError::DivisionByZero));
+```
+
+原生整数未溢出时不创建临时大整数。已有大整数按值移交，允许 malachite 复用底层缓冲；原生整数与大整数混算时需构造 malachite 操作数。超出 i128 范围的大整数与其他类型比较时，当前实现会创建临时大端字节缓冲，并非所有路径都零分配。
+
+### 可选序列化
+
+默认不启用序列化，`serde` 和 `fory` 可分别或同时启用：
+
+```toml
+[dependencies]
+pi_num_cmp = { version = "0.2", features = ["serde", "fory"] }
+```
+
+`serde` 提供 `Serialize` / `Deserialize`，保留枚举变体，并使用 malachite 的大整数序列化表示。具体格式由所选 Serde 后端决定；JSON 不支持 NaN 和无穷的无损往返，请使用支持这些值的格式或限制数据范围。
+
+`fory` 使用自定义 serializer，当前按 Rust 原生模式配置，不承诺跨语言或长期字节格式稳定：
+
+```rust
+use pi_num_cmp::Number;
+
+let mut fory = fory::Fory::builder().xlang(false).build();
+fory.register_serializer::<Number>(100).unwrap();
+let bytes = fory.serialize_with::<Number>(&Number::I64(42)).unwrap();
+let decoded = fory.deserialize_with::<Number>(&bytes).unwrap();
+assert_eq!(decoded, Number::I64(42));
+```
+
+上例要求应用直接依赖 `fory = "1.7"`，注册 ID 由应用统一分配。嵌套于应用结构字段时，按 Fory 的自定义 serializer 方式指定 `#[fory(with = Number)]`。Fory 1.7.7 在当前 32 位 Windows 工具链上存在上游编译限制，完整功能已在 64 位 Windows MSVC 工具链验证。
+
+malachite 使用 LGPL-3.0 许可证；分发包含本库的程序时请同时核对依赖许可证义务。替换大整数后，`Integer` 的 Serde 表示与旧 num-bigint 版本不同，旧数据需由应用迁移，不能假设直接兼容。
 
 ## 性能特点
 
